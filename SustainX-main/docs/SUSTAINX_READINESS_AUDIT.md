@@ -20,7 +20,7 @@ Rule applied throughout: a feature counts as *working* only with test or runtime
 
 ## 2. Partially implemented or broken features
 
-1. **`POST /api/routes/plan` always 500s (bug, verified by reading).** `controllers/routeController.js:74` builds `meta: { ..., wards }` but no `wards` variable exists in scope → `ReferenceError` on every successful plan. Worse, the `CollectionRoute` document is created (L64) *before* the throw, so the client gets a 500 for an operation that half-succeeded. Route auth itself is fine (`routes/routeRoutes.js:8` has `router.use(protect)`).
+1. **`POST /api/routes/plan` failed with 500 — FIXED and verified (2026-10-09).** Root cause was four stacked defects, found by tracing plus regression tests (`server/tests/routes.test.js`, 7 tests): (a) `routeController.js` built audit meta with undefined `wards` *after* persisting; (b) controller passed singular `ward` while the service reads plural `wards`; (c) `routeOptimization.js` destructured models (`const { Vehicle } = require(...)`) yielding `undefined`, and referenced an undeclared `maxPoints`; (d) the service returned a bare route object while the controller expects `{ route }`, and numeric score `priority` failed the schema enum on save. Fix: shared input normalizer (`ward`/`wards`/`blocks`, coordinate + method validation), `{ route }` contract, schema-shape stop mapper with deterministic score→enum mapping, audit meta built before the write. Suite now 97/97.
 2. **Image proof completion is blocked wherever Cloudinary is unconfigured.** `middleware/upload.js:56-66` rejects when `CLOUDINARY_*` are empty (they are, in `server/.env`), and `completeComplaint` returns 500 in that case. Reporting still works (image saved as null), but collector proof-of-completion cannot succeed in production without Cloudinary or `UPLOAD_DRIVER=local` (local mode exists and tests use it).
 3. **Ward identity is split-brained.** `Ward` docs use codes `W1–W5` (`seed-city.js:33-39`), but all authorization/scoping, `statsController.js`, `analyticsService.js`, `aiService.js`, and the IoT alert path group by legacy `block` A–E. The frontend hardcodes the same assumption (`client/src/lib/geography.js:16-22` — "must stay A-E today"), so real `W1` codes render raw/unknown in charts, hotspot markers, and ward labels.
 4. **ML/AI is scaffolding, not inference.** `ml-service/` has API/schema/training code but **zero trained artifacts** (no `.pkl`/`.joblib`/`.pt`/registry) and no `ML_SERVICE_URL` in `server/.env`, so `services/mlServiceClient.js` always degrades to `modelStatus: 'UNAVAILABLE'` and the backend serves rule-based estimates. Honestly labeled — but not real inference.
@@ -36,7 +36,7 @@ Rule applied throughout: a feature counts as *working* only with test or runtime
 
 ## 4. Tests and results (this audit)
 
-- Backend `npm test`: **90/90 pass** (83 baseline + 7 seed-guard tests), `node:test` against local `sustainx_test` only — Atlas untouched.
+- Backend `npm test`: **97/97 pass** (83 baseline + 7 seed-guard + 7 route-planning tests), `node:test` against local `sustainx_test` only — Atlas untouched.
 - Frontend `npx eslint src`: clean. `npx vite build`: success (~9 s).
 - Gaps: no tests for route planning, vehicle GPS history edge cases beyond happy path, or multi-ward data (all fixtures are block `A`).
 
@@ -53,7 +53,7 @@ Rule applied throughout: a feature counts as *working* only with test or runtime
 ## 6. Five highest-priority fixes
 
 1. **Neutralize `seed.js`.** Reason: single-command live data loss on the Atlas dev DB. Acceptance: running `npm run seed` cannot wipe collections (guard, rename, or delete the file) and suite stays green.
-2. **Fix `routeController.js:74` (`wards` ReferenceError).** Reason: route planning is 100% broken with a misleading 500 after a half-write. Acceptance: `POST /api/routes/plan` returns 201 with a persisted route, plus a new test covering plan → 201 and invalid input → 400.
+2. **Fix `routeController.js` `wards` bug + route tests — DONE (2026-10-09, suite 97/97).** Remaining route work, if any, is enhancement only.
 3. **Decide the image pipeline.** Reason: collector proof-of-completion cannot work in production as configured. Acceptance: either Cloudinary credentials are provisioned and an end-to-end proof upload succeeds, or a real file store replaces the demo `local` driver — with a test for the chosen path.
 4. **Start a git repository and commit the tree.** Reason: every future fix (including 1–3) is currently unreviewable and unrecoverable. Acceptance: `git status` clean baseline, `.env` untracked/ignored, sensitive files never committed.
 5. **Unify ward identity (block vs `W1–W5`).** Reason: authorization, analytics, AI hotspots, and frontend labels disagree on what a ward *is*; city-scale operation is incoherent until one canonical form wins. Acceptance: one mapping table used by backend scoping, analytics grouping, and `lib/geography.js`, with tests covering a `W1`-coded complaint end to end.

@@ -19,51 +19,127 @@ const genRouteId = async () => {
   return routeId;
 };
 
+const asCodeList = (value, { upper = true } = {}) => {  const arr = value === undefined || value === null ? [] : Array.isArray(value) ? value : [value];
+  return arr.map((v) => String(v).trim()).filter(Boolean).map((v) => (upper ? v.toUpperCase() : v));
+};
+
+const asLngLat = (value, field) => {
+  if (value === undefined || value === null) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length !== 2 ||
+    !Number.isFinite(Number(value[0])) ||
+    !Number.isFinite(Number(value[1])) ||
+    !isLng(Number(value[0])) ||
+    !isLat(Number(value[1]))
+  ) {
+    throw new ApiError(400, `${field} must be [lng, lat] coordinates`);
+  }
+  return [Number(value[0]), Number(value[1])];
+};
+
+// Normalize the plan/preview input contract in ONE place so both endpoints
+// validate identically. Accepts singular `ward` (legacy client shape) and
+// plural `wards` (service shape); everything downstream uses `wards`.
+const normalizePlanInput = (body = {}) => {
+  const { vehicleId, collectorId, ward, wards, blocks } = body;
+  if (!vehicleId || !collectorId) {
+    throw new ApiError(400, 'vehicleId and collectorId are required');
+  }
+  if (wards !== undefined && !Array.isArray(wards)) {
+    throw new ApiError(400, 'wards must be an array of ward codes');
+  }
+  if (blocks !== undefined && !Array.isArray(blocks) && typeof blocks !== 'string') {
+    throw new ApiError(400, 'blocks must be an array of block codes');
+  }
+  const optimizationMethod = body.optimizationMethod || 'nearest-neighbor';
+  if (!['nearest-neighbor', '2-opt', 'manual'].includes(optimizationMethod)) {
+    throw new ApiError(400, 'optimizationMethod must be nearest-neighbor, 2-opt or manual');
+  }
+  return {
+    vehicleId,
+    collectorId,
+    wards: asCodeList([...(ward ? [ward] : []), ...(wards || [])]),
+    blocks: asCodeList(blocks),
+    maxStops: body.maxStops,
+    vehicleCapacityKg: body.vehicleCapacityKg,
+    optimizationMethod,
+    includeBins: body.includeBins !== false,
+    includeComplaints: body.includeComplaints !== false,
+    startLocation: asLngLat(body.startLocation, 'startLocation'),
+    endLocation: asLngLat(body.endLocation, 'endLocation'),
+  };
+};
+
+// The optimizer scores stops numerically, but the route schema stores the
+// enum low/medium/high/critical. Derive it deterministically from the score
+// (documented thresholds — no invented data, same input always maps alike).
+const priorityEnumForScore = (score) => {
+  const n = Number(score);
+  if (!Number.isFinite(n)) return 'medium';
+  if (n >= 50) return 'critical';
+  if (n >= 30) return 'high';
+  if (n >= 15) return 'medium';
+  return 'low';
+};
+
+// Map a loose optimizer stop to the CollectionRoute stop shape (also used
+// for preview responses so plan/preview/get return identical stop shapes).
+const toRouteStopShape = (s, i) => ({
+  sequence: i + 1,
+  kind: s.kind,
+  binId: typeof s.binId === 'string' ? s.binId : null,
+  complaintId: s.complaintDbId || null,
+  location:
+    Array.isArray(s.location) && s.location.length === 2
+      ? { type: 'Point', coordinates: [Number(s.location[0]), Number(s.location[1])] }
+      : s.location,
+  address: s.address || '',
+  ward: typeof s.ward === 'string' ? s.ward : null,
+  priority: priorityEnumForScore(s.priorityScore ?? s.priority),
+  priorityScore: s.priorityScore,
+  priorityReasons: Array.isArray(s.priorityReasons) ? s.priorityReasons : [],
+  estimatedWasteVolume: s.estimatedWasteVolume || 0,
+  estimatedDurationMinutes: s.estimatedDurationMinutes || 0,
+  status: 'pending',
+});
+
 // @desc    Plan and optimize a new collection route
 // @route   POST /api/routes/plan
 // @access  Admin
 const planRoute = async (req, res) => {
   try {
-    const {
-      vehicleId,
-      collectorId,
-      ward,
-      blocks,
-      maxStops = 20,
-      vehicleCapacityKg,
-      optimizationMethod = 'nearest-neighbor',
-      includeBins = true,
-      includeComplaints = true,
-      startLocation,
-      endLocation,
-    } = req.body;
-
-    if (!vehicleId || !collectorId) {
-      throw new ApiError(400, 'vehicleId and collectorId are required');
-    }
+    const input = normalizePlanInput(req.body);
 
     const route = await buildOptimizedRoute({
-      vehicleId,
-      collectorId,
-      ward,
-      blocks,
-      maxStops,
-      vehicleCapacityKg,
-      optimizationMethod,
-      includeBins,
-      includeComplaints,
-      startLocation,
-      endLocation,
+      vehicleId: input.vehicleId,
+      collectorId: input.collectorId,
+      wards: input.wards,
+      blocks: input.blocks,
+      maxStops: input.maxStops,
+      vehicleCapacityKg: input.vehicleCapacityKg,
+      optimizationMethod: input.optimizationMethod,
+      includeBins: input.includeBins,
+      includeComplaints: input.includeComplaints,
+      startLocation: input.startLocation,
+      endLocation: input.endLocation,
     });
 
     if (!route.route) {
       return res.status(400).json({ message: route.message || 'No collection points found' });
     }
 
+    // Everything that can throw is built BEFORE the write, so a failed
+    // plan never leaves a partially created route behind. Service stops use
+    // loose shapes (string complaint codes, [lng,lat] arrays) — map them to
+    // the CollectionRoute schema shape here, before persisting.
     const routeId = await genRouteId();
+    const auditMeta = { routeId, stops: route.route.totalStops, wards: input.wards };
+
     const routeDoc = await CollectionRoute.create({
       ...route.route,
       routeId,
+      stops: route.route.stops.map(toRouteStopShape),
     });
 
     await audit({
@@ -71,7 +147,7 @@ const planRoute = async (req, res) => {
       action: 'route.planned',
       targetType: 'CollectionRoute',
       targetId: routeDoc._id,
-      meta: { routeId: routeDoc.routeId, stops: route.route.totalStops, wards },
+      meta: auditMeta,
       req,
     });
 
@@ -87,36 +163,20 @@ const planRoute = async (req, res) => {
 // @access  Admin
 const previewRoute = async (req, res) => {
   try {
-    const {
-      vehicleId,
-      collectorId,
-      ward,
-      blocks,
-      maxStops = 20,
-      vehicleCapacityKg,
-      optimizationMethod = 'nearest-neighbor',
-      includeBins = true,
-      includeComplaints = true,
-      startLocation,
-      endLocation,
-    } = req.body;
-
-    if (!vehicleId || !collectorId) {
-      throw new ApiError(400, 'vehicleId and collectorId are required');
-    }
+    const input = normalizePlanInput(req.body);
 
     const route = await buildOptimizedRoute({
-      vehicleId,
-      collectorId,
-      ward,
-      blocks,
-      maxStops,
-      vehicleCapacityKg,
-      optimizationMethod,
-      includeBins,
-      includeComplaints,
-      startLocation,
-      endLocation,
+      vehicleId: input.vehicleId,
+      collectorId: input.collectorId,
+      wards: input.wards,
+      blocks: input.blocks,
+      maxStops: input.maxStops,
+      vehicleCapacityKg: input.vehicleCapacityKg,
+      optimizationMethod: input.optimizationMethod,
+      includeBins: input.includeBins,
+      includeComplaints: input.includeComplaints,
+      startLocation: input.startLocation,
+      endLocation: input.endLocation,
     });
 
     if (!route.route) {
@@ -128,23 +188,7 @@ const previewRoute = async (req, res) => {
       preview: true,
       routeId: 'PREVIEW-' + Date.now().toString(36).toUpperCase(),
       ...route.route,
-      stops: route.route.stops.map((s, i) => ({
-        sequence: i + 1,
-        kind: s.kind,
-        binId: s.binId,
-        complaintId: s.complaintId,
-        location: s.location,
-        address: s.address,
-        ward: s.ward,
-        priority: s.priority,
-        priorityScore: s.priorityScore,
-        priorityReasons: s.priorityReasons,
-        estimatedWasteVolume: s.estimatedWasteVolume,
-        estimatedDurationMinutes: s.estimatedDurationMinutes,
-        status: 'pending',
-        capacityExceeded: s.capacityExceeded,
-        capacityWarning: s.capacityWarning,
-      })),
+      stops: route.route.stops.map(toRouteStopShape),
       plannedDistanceKm: route.route.plannedDistanceKm,
       plannedDurationMinutes: route.route.plannedDurationMinutes,
       estimatedWasteVolume: route.route.estimatedWasteVolume,

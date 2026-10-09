@@ -12,12 +12,12 @@
  * For production, integrate with OSRM/OpenRouteService for road distances.
  */
 
-const { SmartBin } = require('../models/SmartBin');
-const { Complaint } = require('../models/Complaint');
-const { Vehicle } = require('../models/Vehicle');
-const { CollectionTask } = require('../models/CollectionTask');
-const { CollectionRoute } = require('../models/CollectionRoute');
-const { User } = require('../models/User');
+const SmartBin = require('../models/SmartBin');
+const Complaint = require('../models/Complaint');
+const Vehicle = require('../models/Vehicle');
+const CollectionTask = require('../models/CollectionTask');
+const CollectionRoute = require('../models/CollectionRoute');
+const User = require('../models/User');
 const ApiError = require('../utils/ApiError');
 const { sanitizeQuery, isLat, isLng } = require('../utils/validate');
 
@@ -484,7 +484,7 @@ async function buildOptimizedRoute(options) {
     blocks,
     includeBins,
     includeComplaints,
-    maxPoints,
+    maxPoints: maxStops,
   });
 
   if (points.length === 0) {
@@ -568,7 +568,9 @@ async function buildOptimizedRoute(options) {
     optimizationWarnings: warnings,
   };
 
-  return route;
+  // Contract: { route, message, stops } — mirrors the empty-result shape
+  // ({ route: null, ... }) so callers can rely on `route.route`.
+  return { route, message: 'Route optimized successfully', stops: route.stops };
 }
 
 module.exports = {
