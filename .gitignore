@@ -1,0 +1,25 @@
+# Dependency directories (bare pattern matches at every level)
+node_modules/
+
+# Build directories
+dist/
+build/
+SustainX-main/client/dist/
+SustainX-main/client/build/
+
+# Environment files (bare patterns match at every level: server/.env, client/.env)
+.env
+*.env
+!.env.example
+
+# Logs and coverage
+*.log
+logs/
+coverage/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# User-uploaded files (76 complaint images live here; never commit)
+SustainX-main/server/uploads/
