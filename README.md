@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🌱 SustainX – Smart Waste Management System
 
 SustainX is an IoT + MERN stack based system that monitors garbage levels in real-time using ESP32 and sensors.
@@ -55,3 +56,6 @@ Pull requests are welcome!
 
 ## 📜 License
 MIT License
+=======
+# sustainx-city-
+>>>>>>> a48f4c21034bb6c099ad2e4e2977e40552ed76ad
